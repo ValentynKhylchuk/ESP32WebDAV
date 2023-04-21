@@ -17,6 +17,9 @@ const char *wdays[]  = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 // ------------------------
 bool ESPWebDAV::init(int chipSelectPin, int serverPort) {
 // ------------------------
+
+	//_canRunOnSecond = xSemaphoreCreateMutex();
+
 	// start the wifi server
 	server = new WiFiServer(serverPort);
 	server->begin();
@@ -307,7 +310,6 @@ void ESPWebDAV::handleProp(ResourceType resource)	{
 //void ESPWebDAV::sendPropResponse(boolean recursing, FatFile *curFile)	{
 void ESPWebDAV::sendPropResponse(boolean recursing, File *curFile)	{
 // ------------------------
-	Serial.println("sendPropResponse");
 	char buf[255];
 	//curFile->getName(buf, sizeof(buf));
 	strcpy(buf, curFile->name());
@@ -432,116 +434,358 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 
 	sendHeader("Allow", "PROPFIND,OPTIONS,DELETE,COPY,MOVE,HEAD,POST,PUT,GET");
 
-	File nFile = SD_MMC.open(uri.c_str(), FILE_WRITE);
-	// if file does not exist, create it
-	if(resource == RESOURCE_NONE)	{
-		//if(!nFile.open(uri.c_str(), O_CREAT | O_WRITE))
+	// Check if we can create new file.
+	if(resource == RESOURCE_NONE)
+	{
+		File nFile = SD_MMC.open(uri.c_str(), FILE_WRITE);
 		if(!nFile)
+		{
 			return handleWriteError("Unable to create a new file", &nFile);
+		}
+		nFile.close();
 	}
 
-	// file is created/open for writing at this point
 	DBG_PRINT(uri); DBG_PRINTLN(" - ready for data");
-	// did server send any data in put
-	size_t contentLen = contentLengthHeader.toInt();
-
-	if(contentLen != 0)	{
-		// buffer size is critical *don't change*
-		const size_t WRITE_BLOCK_CONST = 1024;
-		uint8_t buf[WRITE_BLOCK_CONST];
-		long tStart = millis();
-		size_t numRemaining = contentLen;
-
-		// high speed raw write implementation
-		// close any previous file
-		nFile.close();
-		// delete old file
-		//sd.remove(uri.c_str());
-		if(SD_MMC.remove(uri.c_str())){
-        	DBG_PRINT(uri); DBG_PRINTLN(" - deleted.");
-    	} else {
-        	DBG_PRINT(uri); DBG_PRINTLN(" - can not be deleted.");
-    	}
 	
-		/*
-		// create a contiguous file
-		size_t contBlocks = (contentLen/WRITE_BLOCK_CONST + 1);
-		uint32_t bgnBlock, endBlock;
+	// Check if we have data to read and write.
+	size_t contentLen = contentLengthHeader.toInt();
+	if(contentLen <= 0)
+	{
+		Serial.println("There is no content to write. Write task creation skipped.");
+		if(resource == RESOURCE_NONE)
+			send("201 Created", NULL, "");
+		else
+			send("200 OK", NULL, "");
+		return;
+	}
+	
+	Serial.print("Call before new task. Running on core: "); Serial.println(xPortGetCoreID());
 
-		if (!nFile.createContiguous(sd.vwd(), uri.c_str(), contBlocks * WRITE_BLOCK_CONST))
-			return handleWriteError("File create contiguous sections failed", &nFile);
+	// Reset some.
+	S_buffer_1_readNum = 0;
+	S_buffer_2_readNum = 0;
 
-		// get the location of the file's blocks
-		if (!nFile.contiguousRange(&bgnBlock, &endBlock))
-			return handleWriteError("Unable to get contiguous range", &nFile);
-
-		if (!sd.card()->writeStart(bgnBlock, contBlocks))
-			return handleWriteError("Unable to start writing contiguous range", &nFile);
-
-		*/
-
-		long t_read = 0;
-		long t_write = 0;
-		long t_s = 0;
-
+	S_buffer_1_partNum = -1;
+	S_buffer_2_partNum = -1;
 		
-		nFile = SD_MMC.open(uri.c_str(), FILE_WRITE);
+	// Create Mutex.
+	S_buffer_access_1 = xSemaphoreCreateMutex();
+	S_buffer_access_2 = xSemaphoreCreateMutex();;
+	S_reading = xSemaphoreCreateMutex();;
+	S_writing = xSemaphoreCreateMutex();;
 
-		// read data from stream and write to the file
-		while(numRemaining > 0)	{
-			size_t numToRead = (numRemaining > WRITE_BLOCK_CONST) ? WRITE_BLOCK_CONST : numRemaining;
+	// Take control on reed before writing task started.
+	if(!xSemaphoreTake(S_reading, (TickType_t)100))
+	{
+		return handleWriteError("Unable to obtain controll over read mutex.", NULL);
+	}
 
-			t_s = millis();
-			size_t numRead = readBytesWithTimeout(buf, sizeof(buf), numToRead);
+	// Start writing task on other core.
+	int core = 0;
+	if(xPortGetCoreID() == core)
+	{
+		core = 1;
+	}
 
-			t_read = t_read + (millis() - t_s);
+	xTaskCreatePinnedToCore(
+		handlePutTrigger,   /* Task function. */
+		"Task2",     		/* name of task. */
+		10000,       		/* Stack size of task */
+		this,        		/* parameter of the task */
+		1,           		/* priority of the task */
+		&S_WriteTask,		/* Task handle to keep track of created task */
+		0);          		/* pin task to core 1 */
 
-			if(numRead == 0)
-				break;
+	// Removing file if it exists.
+	SD_MMC.remove(uri.c_str());
+	
+	// Set num of date that we need to read and write.
+	size_t numRemaining = contentLen;
+	// Count number of blocks.
+	int part_number = -1;
+	// Save start time.
+	long tStart = millis();
+	// Prepare to count time for read operation.
+	long t_read = 0;
+	long t_s = 0;
 
-			// store whole buffer into file regardless of numRead
-			//if (!sd.card()->writeData(buf))
+	// Open file to write it.
+	S_WriteFile = SD_MMC.open(uri.c_str(), FILE_WRITE);
+		
+	// read data from stream and write to the file
+	while(numRemaining > 0)
+	{
+		// count work that left
+		size_t numToRead = (numRemaining > 1024) ? 1024 : numRemaining;
+		// save num of read date
+		size_t numRead = 0;
+		// save time
+		t_s = millis();
 
-			t_s = millis();
-			if (! nFile.write(buf, numRead))
-				return handleWriteError("Write data failed", &nFile);
-			t_write = t_write + (millis() - t_s);
-
-			// reduce the number outstanding
-			numRemaining -= numRead;
-
-			//DBG_PRINT("Transfer:  "); DBG_PRINT((contentLen - numRemaining)/ 1024.0); DBG_PRINT(" KB stored in: "); DBG_PRINT((millis() - tStart)/1000); DBG_PRINTLN(" sec");
+		// get access to buffer 1 to read into it.
+		if(xSemaphoreTake(S_buffer_access_1, 0 )) 
+		{
+			// check if buffer is empty
+			if(S_buffer_1_partNum == -1)
+			{
+				Serial.println ("Reading into buffer 1.");
+				// update part number
+				part_number++;
+				// read data
+				numRead = readBytesWithTimeout(S_buffer_1, sizeof(S_buffer_1), numToRead);
+				// save info
+				S_buffer_1_partNum = part_number;
+				S_buffer_1_readNum = numRead;
+				// update remainig
+				numRemaining -= numRead;
+				// release buffer 1 access
+				Serial.println ("Reading into buffer 1. Finished.");
+				if(xSemaphoreGive(S_buffer_access_1))
+				// save taken time
+				delay(1);
+				t_read = t_read + (millis() - t_s);
+				// start next round
+				if(numRead == 0)
+					break;
+				else
+					continue;
+			}
+			else
+			{
+				// buffer has data inside.
+				Serial.println ("Buffer 1 is not empty.");
+			}
 		}
 
-		// stop writing operation
-		nFile.flush();
-		nFile.close();
-		/*
-		if (!nFile.flush sd.card()->writeStop())
-			return handleWriteError("Unable to stop writing contiguous range", &nFile);
+		// get access to buffer 2 to read into it.
+		if(xSemaphoreTake(S_buffer_access_2, 0 )) 
+		{
+			// check if buffer is empty
+			if(S_buffer_2_partNum == -1)
+			{
+				Serial.println ("Reading into buffer 2.");
+				// update part number
+				part_number++;
+				// read data
+				numRead = readBytesWithTimeout(S_buffer_2, sizeof(S_buffer_2), numToRead);
+				// save info
+				S_buffer_2_partNum = part_number;
+				S_buffer_2_readNum = numRead;
+				// update remainig
+				numRemaining -= numRead;
+				// release buffer 2 access
+				Serial.println ("Reading into buffer 2. Finished.");
+				xSemaphoreGive(S_buffer_access_2);
+				// save taken time
+				delay(1);
+				t_read = t_read + (millis() - t_s);
+				// start next round
+				if(numRead == 0)
+					break;
+				else
+					continue;
+			}
+			else
+			{
+				// buffer has data inside.
+				Serial.println ("Buffer 2 is not empty.");
+			}
+		}
 
-		// detect timeout condition
-		if(numRemaining)
-			return handleWriteError("Timed out waiting for data", &nFile);
+		// check if writing got error.
+		if(xSemaphoreTake(S_writing, 0 ))
+		{
+			Serial.println ("Writing error detected.");
+			xSemaphoreGive(S_writing);
+			handleWriteError(S_writeErrorMesage, &S_WriteFile);
+		}
 
-		// truncate the file to right length
-		if(!nFile.truncate(contentLen))
-			return handleWriteError("Unable to truncate the file", &nFile);
-		*/
-		DBG_PRINTLN("=====================================================");
-		DBG_PRINT("File "); DBG_PRINT(contentLen - numRemaining); DBG_PRINT(" bytes stored in: "); DBG_PRINT((millis() - tStart)/1000.0); DBG_PRINTLN(" sec");
-		DBG_PRINT("Speed: "); DBG_PRINT( ((contentLen - numRemaining) / 1024.0) / ((millis() - tStart)/1000.0) ); DBG_PRINTLN(" KB/s.");
-		DBG_PRINT("Read to buffer time: "); DBG_PRINT( t_read / 1000.0); DBG_PRINTLN(" s.");
-		DBG_PRINT("Write to card time: "); DBG_PRINT( t_write / 1000.0); DBG_PRINTLN(" s.");
-		DBG_PRINTLN("=====================================================");
+		Serial.println ("All reading buffers are busy.");
+		delay(12);
+		continue;
 	}
+	
+	// mark signal end of reading
+	DBG_PRINTLN(" Reading end.");
+	xSemaphoreGive(S_reading);
+	DBG_PRINT("Read to buffer time: "); DBG_PRINT( t_read / 1000.0); DBG_PRINTLN(" s.");
+
+	// waiting for write to finish
+	if(xSemaphoreTake(S_writing, 1000 / portTICK_PERIOD_MS))
+	{
+		DBG_PRINTLN(" Wrinting detected as ended.");
+		xSemaphoreGive(S_writing);
+	}
+	else
+	{
+		Serial.println("Terminateing write task.");
+		vTaskDelete(S_WriteTask); 
+		return handleWriteError("Unable to obtain controll over read mutex.", &S_WriteFile);
+	}
+
+	// stop writing operation
+	S_WriteFile.flush();
+	S_WriteFile.close();
+
+	DBG_PRINTLN("=====================================================");
+	DBG_PRINT("File "); DBG_PRINT(contentLen - numRemaining); DBG_PRINT(" bytes stored in: "); DBG_PRINT((millis() - tStart)/1000.0); DBG_PRINTLN(" sec");
+	DBG_PRINT("Speed: "); DBG_PRINT( ((contentLen - numRemaining) / 1024.0) / ((millis() - tStart)/1000.0) ); DBG_PRINTLN(" KB/s.");
+	DBG_PRINTLN("=====================================================");
 
 	if(resource == RESOURCE_NONE)
 		send("201 Created", NULL, "");
 	else
 		send("200 OK", NULL, "");
+}
 
-	nFile.close();
+
+void handlePutTrigger(void * pvParameters)	{
+// ------------------------
+	((ESPWebDAV *) pvParameters)->handlePutPP();
+	vTaskDelete(NULL);
+	return;
+}
+
+// ------------------------
+void ESPWebDAV::handlePutPP()	{
+// ------------------------
+	Serial.print("    |    Writing running on core: "); Serial.println(xPortGetCoreID());
+	// Take control on write.
+	
+	if(!xSemaphoreTake(S_writing, portMAX_DELAY))
+	{
+		// error detected
+		S_writeErrorMesage = "    |    Unable to obtain controll over write mutex.";
+		vTaskDelete(NULL);
+		return;
+	}
+	
+	Serial.println("    |    Writing running... ");
+
+	// give some time for read to start;
+	delay(20);
+
+	// save time
+	long t_write = 0;
+	long t_s = 0;
+	
+	// prepare for additional data order checking
+	int expecterPart = 0;
+	
+	// read data from stream and write to the file
+	while(true)	
+	{
+		bool hasWrongParts = false;
+		t_s = millis();
+		
+		Serial.println("    |    Ask fo buffer 1... ");
+		//if(xSemaphoreTake(S_buffer_access_1, 10 / portTICK_PERIOD_MS))
+		if(xSemaphoreTake(S_buffer_access_1, 2 / portTICK_PERIOD_MS))
+		{
+			if(S_buffer_1_partNum == expecterPart)
+			{
+				Serial.print ("    |    Writing from buffer 1. Part:"); Serial.println(expecterPart);
+				// check for wrong pard passed
+				hasWrongParts = false;
+				if (!S_WriteFile.write(S_buffer_1, S_buffer_1_readNum))
+				{	
+					// error detected
+					S_writeErrorMesage = "    |    Write data failed";
+					// release semaphores
+					xSemaphoreGive(S_buffer_access_1);
+					xSemaphoreGive(S_writing);
+					vTaskDelete(NULL);					
+					return;
+				}
+
+				delay(8);
+				// increase part number
+				expecterPart++;
+				// mark buffer as empty
+				S_buffer_1_partNum = -1;
+				// save time
+				t_write = t_write + (millis() - t_s);
+				Serial.println ("    |    Writing from buffer 1. Finished.");
+				// release access to buffer
+				xSemaphoreGive(S_buffer_access_1);
+				// start next round
+				continue;
+			}
+			// if buffer not emty and has not expected part
+			if(S_buffer_1_partNum != -1)
+			{
+				hasWrongParts = true;
+			}
+			// release access to buffer
+			xSemaphoreGive(S_buffer_access_1);
+		}
+		
+		Serial.println("    |    Ask fo buffer 2... ");
+		delay(5);
+		if(xSemaphoreTake(S_buffer_access_2, 2 / portTICK_PERIOD_MS))
+		{
+			if(S_buffer_2_partNum == expecterPart)
+			{
+				Serial.print ("    |    Writing from buffer 2. Part:"); Serial.println(expecterPart);
+				// check for wrong pard passed
+				hasWrongParts = false;
+				if (!S_WriteFile.write(S_buffer_2, S_buffer_2_readNum))
+				{	
+					// error detected
+					S_writeErrorMesage = "    |    Write data failed";
+					// release semaphores
+					xSemaphoreGive(S_buffer_access_2);
+					xSemaphoreGive(S_writing);
+					vTaskDelete(NULL);
+					return;
+				}
+				// increase part number
+				expecterPart++;
+				// mark buffer as empty
+				S_buffer_2_partNum = -1;
+				// save time
+				t_write = t_write + (millis() - t_s);
+				Serial.println ("    |    Writing from buffer 2. Finished.");
+				// release access to buffer
+				xSemaphoreGive(S_buffer_access_2);
+				// start next round
+				continue;
+			}
+			// if buffer not emty and has not expected part
+			if(S_buffer_2_partNum != -1)
+			{
+				hasWrongParts = true;
+			}
+			// release access to buffer
+			xSemaphoreGive(S_buffer_access_2);
+		}
+
+		Serial.println("    |    Check for parts order issue. ");
+		// check for parts order issue.
+		if(hasWrongParts)
+		{
+			S_writeErrorMesage = "    |    Write data failed. Unexpected data parts.";
+			xSemaphoreGive(S_writing);
+			vTaskDelete(NULL);					
+			return;
+		}
+
+		Serial.println("    |    Check for writing end. ");
+		// check for writing end.
+		if(xSemaphoreTake(S_reading, 0))
+		{
+			Serial.println ("    |    Writing. Detected finish.");
+			DBG_PRINT("Write to card time: "); DBG_PRINT( t_write / 1000.0); DBG_PRINTLN(" s.");
+			delay(10);
+			xSemaphoreGive(S_writing);
+			xSemaphoreGive(S_reading);
+			vTaskDelete(NULL);
+			return;
+		}
+
+		Serial.println ("    |    ...");
+		delay(10);
+	}
 }
 
 

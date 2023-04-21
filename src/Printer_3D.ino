@@ -98,8 +98,8 @@ void setup() {
 
 	// ----- SD Card and Server -------
 	// Check to see if other master is using the SPI bus
-	while(millis() < spiBlockoutTime)
-		blink();
+	//while(millis() < spiBlockoutTime)
+	//	blink();
 	
 	takeBusControl();
 	
@@ -126,7 +126,7 @@ void loop() {
 	if(millis() < spiBlockoutTime)
 		blink();
 
-	// do it only if there is a need to read FS
+	/*
 	if( clientWiting != dav.isClientWaiting())
 	{
 		clientWiting = dav.isClientWaiting();
@@ -143,7 +143,9 @@ void loop() {
 		}
 		Serial.println("...");
 	}
+	*/
 	
+	// do it only if there is a need to read FS
 	if(dav.isClientWaiting())	{
 		if(initFailed)
 			return dav.rejectClient(statusMessage);
@@ -154,7 +156,6 @@ void loop() {
 		
 		// a client is waiting and FS is ready and other SPI master is not using the bus
 		// takeBusControl();
-		Serial.println("=== before handleClient");
 		dav.handleClient();
 		// relenquishBusControl();
 	}

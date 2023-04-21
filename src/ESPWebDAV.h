@@ -20,12 +20,33 @@ enum ResourceType { RESOURCE_NONE, RESOURCE_FILE, RESOURCE_DIR };
 enum DepthType { DEPTH_NONE, DEPTH_CHILD, DEPTH_ALL };
 
 
+
 class ESPWebDAV	{
 public:
 	bool init(int chipSelectPin, int serverPort);
 	bool isClientWaiting();
 	void handleClient(String blank = "");
 	void rejectClient(String rejectMessage);
+
+	SemaphoreHandle_t S_buffer_access_1 = NULL;
+	SemaphoreHandle_t S_buffer_access_2 = NULL;
+	SemaphoreHandle_t S_reading = NULL;
+	SemaphoreHandle_t S_writing = NULL;
+
+	uint8_t S_buffer_1[1024];
+	uint8_t S_buffer_2[1024];
+	volatile size_t S_buffer_1_readNum = 0;
+	volatile size_t S_buffer_2_readNum = 0;
+	volatile int S_buffer_1_partNum = -1;
+	volatile int S_buffer_2_partNum = -1;
+	String S_writeErrorMesage;
+	
+	QueueHandle_t
+
+	TaskHandle_t S_WriteTask;
+	File S_WriteFile;
+	void handlePutPP();
+
 	
 protected:
 	typedef void (ESPWebDAV::*THandlerFunction)(String);
@@ -82,6 +103,4 @@ protected:
 };
 
 
-
-
-
+void handlePutTrigger(void * pvParameters);
