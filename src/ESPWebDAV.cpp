@@ -462,17 +462,10 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	Serial.print("Call before new task. Running on core: "); Serial.println(xPortGetCoreID());
 
 	// Reset some.
-	S_buffer_1_readNum = 0;
-	S_buffer_2_readNum = 0;
-
-	S_buffer_1_partNum = -1;
-	S_buffer_2_partNum = -1;
-		
-	// Create Mutex.
-	S_buffer_access_1 = xSemaphoreCreateMutex();
-	S_buffer_access_2 = xSemaphoreCreateMutex();;
-	S_reading = xSemaphoreCreateMutex();;
-	S_writing = xSemaphoreCreateMutex();;
+	S_reading = xSemaphoreCreateMutex();
+	S_writing = xSemaphoreCreateMutex();
+	struct DataPortin pDataPortin;
+	S_dataQueue = xQueueCreate( 3, sizeof(pDataPortin) );
 
 	// Take control on reed before writing task started.
 	if(!xSemaphoreTake(S_reading, (TickType_t)100))
@@ -515,6 +508,14 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	// read data from stream and write to the file
 	while(numRemaining > 0)
 	{
+		// check if writing got error.
+		if(xSemaphoreTake(S_writing, 0 ))
+		{
+			Serial.println ("Writing error detected.");
+			xSemaphoreGive(S_writing);
+			return handleWriteError(S_writeErrorMesage, &S_WriteFile);
+		}
+
 		// count work that left
 		size_t numToRead = (numRemaining > 1024) ? 1024 : numRemaining;
 		// save num of read date
@@ -522,98 +523,48 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		// save time
 		t_s = millis();
 
-		// get access to buffer 1 to read into it.
-		if(xSemaphoreTake(S_buffer_access_1, 0 )) 
-		{
-			// check if buffer is empty
-			if(S_buffer_1_partNum == -1)
-			{
-				Serial.println ("Reading into buffer 1.");
-				// update part number
-				part_number++;
-				// read data
-				numRead = readBytesWithTimeout(S_buffer_1, sizeof(S_buffer_1), numToRead);
-				// save info
-				S_buffer_1_partNum = part_number;
-				S_buffer_1_readNum = numRead;
-				// update remainig
-				numRemaining -= numRead;
-				// release buffer 1 access
-				Serial.println ("Reading into buffer 1. Finished.");
-				if(xSemaphoreGive(S_buffer_access_1))
-				// save taken time
-				delay(1);
-				t_read = t_read + (millis() - t_s);
-				// start next round
-				if(numRead == 0)
-					break;
-				else
-					continue;
-			}
-			else
-			{
-				// buffer has data inside.
-				Serial.println ("Buffer 1 is not empty.");
-			}
-		}
+		// update part number
+		part_number++;
+		
+		Serial.print ("Reading into buffer. Part: ");Serial.println (part_number);
 
-		// get access to buffer 2 to read into it.
-		if(xSemaphoreTake(S_buffer_access_2, 0 )) 
+		// read data
+		numRead = readBytesWithTimeout(pDataPortin.buffer, sizeof(pDataPortin.buffer), numToRead);
+		// save info
+		pDataPortin.partNum = part_number;
+		pDataPortin.readNum = numRead;
+		// update remainig
+		numRemaining -= numRead;
+		t_read = t_read + (millis() - t_s);;
+		// adding data to queue
+		Serial.println ("Reading into buffer. Adding to queue...");
+		if(xQueueSend( S_dataQueue, &pDataPortin, 1000 / portTICK_PERIOD_MS ))
 		{
-			// check if buffer is empty
-			if(S_buffer_2_partNum == -1)
-			{
-				Serial.println ("Reading into buffer 2.");
-				// update part number
-				part_number++;
-				// read data
-				numRead = readBytesWithTimeout(S_buffer_2, sizeof(S_buffer_2), numToRead);
-				// save info
-				S_buffer_2_partNum = part_number;
-				S_buffer_2_readNum = numRead;
-				// update remainig
-				numRemaining -= numRead;
-				// release buffer 2 access
-				Serial.println ("Reading into buffer 2. Finished.");
-				xSemaphoreGive(S_buffer_access_2);
-				// save taken time
-				delay(1);
-				t_read = t_read + (millis() - t_s);
-				// start next round
-				if(numRead == 0)
-					break;
-				else
-					continue;
-			}
-			else
-			{
-				// buffer has data inside.
-				Serial.println ("Buffer 2 is not empty.");
-			}
+			Serial.println ("Reading into buffer. Finished.");
 		}
-
-		// check if writing got error.
-		if(xSemaphoreTake(S_writing, 0 ))
+		else
 		{
-			Serial.println ("Writing error detected.");
-			xSemaphoreGive(S_writing);
-			handleWriteError(S_writeErrorMesage, &S_WriteFile);
+			Serial.println ("Reading into buffer. Error. Can not add to queue.");
+			break;
 		}
+		delay(1);
 
-		Serial.println ("All reading buffers are busy.");
-		delay(12);
-		continue;
+		// stop if nothing to read
+		if(numRead == 0)
+		{
+			break;
+		}
 	}
 	
 	// mark signal end of reading
-	DBG_PRINTLN(" Reading end.");
+	DBG_PRINTLN("Reading end.");
 	xSemaphoreGive(S_reading);
-	DBG_PRINT("Read to buffer time: "); DBG_PRINT( t_read / 1000.0); DBG_PRINTLN(" s.");
+	DBG_PRINT(" == Read to buffer time: "); DBG_PRINT( t_read / 1000.0); DBG_PRINTLN(" s.");
 
 	// waiting for write to finish
 	if(xSemaphoreTake(S_writing, 1000 / portTICK_PERIOD_MS))
 	{
-		DBG_PRINTLN(" Wrinting detected as ended.");
+		DBG_PRINTLN("Wrinting detected as ended.");
 		xSemaphoreGive(S_writing);
 	}
 	else
@@ -652,7 +603,7 @@ void ESPWebDAV::handlePutPP()	{
 	Serial.print("    |    Writing running on core: "); Serial.println(xPortGetCoreID());
 	// Take control on write.
 	
-	if(!xSemaphoreTake(S_writing, portMAX_DELAY))
+	if(!xSemaphoreTake(S_writing,  200 / portTICK_PERIOD_MS))
 	{
 		// error detected
 		S_writeErrorMesage = "    |    Unable to obtain controll over write mutex.";
@@ -663,113 +614,62 @@ void ESPWebDAV::handlePutPP()	{
 	Serial.println("    |    Writing running... ");
 
 	// give some time for read to start;
-	delay(20);
+	delay(10);
 
 	// save time
 	long t_write = 0;
 	long t_s = 0;
 	
-	// prepare for additional data order checking
-	int expecterPart = 0;
-	
 	// read data from stream and write to the file
 	while(true)	
 	{
-		bool hasWrongParts = false;
+		struct DataPortin pDataPortin;
+		
 		t_s = millis();
 		
-		Serial.println("    |    Ask fo buffer 1... ");
-		//if(xSemaphoreTake(S_buffer_access_1, 10 / portTICK_PERIOD_MS))
-		if(xSemaphoreTake(S_buffer_access_1, 2 / portTICK_PERIOD_MS))
+		Serial.println("    |    Ask for data in queue... ");
+		if( xQueueReceive( S_dataQueue, &pDataPortin, 200 / portTICK_PERIOD_MS ))
 		{
-			if(S_buffer_1_partNum == expecterPart)
+			Serial.printf("    |    readNum: %d, partNum: %d \n", pDataPortin.readNum, pDataPortin.partNum);
+			if(pDataPortin.partNum == -1)
 			{
-				Serial.print ("    |    Writing from buffer 1. Part:"); Serial.println(expecterPart);
-				// check for wrong pard passed
-				hasWrongParts = false;
-				if (!S_WriteFile.write(S_buffer_1, S_buffer_1_readNum))
-				{	
-					// error detected
-					S_writeErrorMesage = "    |    Write data failed";
-					// release semaphores
-					xSemaphoreGive(S_buffer_access_1);
-					xSemaphoreGive(S_writing);
-					vTaskDelete(NULL);					
-					return;
-				}
+				// error detected
+				S_writeErrorMesage = "    |    Write data failed. Empty data.";
+				// release semaphores
+				xSemaphoreGive(S_writing);
+				vTaskDelete(NULL);
+				return;
+			}
 
-				delay(8);
-				// increase part number
-				expecterPart++;
-				// mark buffer as empty
-				S_buffer_1_partNum = -1;
-				// save time
+			Serial.print ("    |    Writing from buffer. Part:"); Serial.println(pDataPortin.partNum);
+			if (S_WriteFile.write(pDataPortin.buffer, pDataPortin.readNum))
+			{
 				t_write = t_write + (millis() - t_s);
-				Serial.println ("    |    Writing from buffer 1. Finished.");
-				// release access to buffer
-				xSemaphoreGive(S_buffer_access_1);
-				// start next round
+				Serial.println ("    |    Writing from buffer. Finished.");
 				continue;
 			}
-			// if buffer not emty and has not expected part
-			if(S_buffer_1_partNum != -1)
-			{
-				hasWrongParts = true;
+			else
+			{	
+				// error detected
+				S_writeErrorMesage = "    |    Write data failed.";
+				// release semaphores
+				xSemaphoreGive(S_writing);
+				vTaskDelete(NULL);
+				return;
 			}
-			// release access to buffer
-			xSemaphoreGive(S_buffer_access_1);
 		}
-		
-		Serial.println("    |    Ask fo buffer 2... ");
-		delay(5);
-		if(xSemaphoreTake(S_buffer_access_2, 2 / portTICK_PERIOD_MS))
+		/*
+		else
 		{
-			if(S_buffer_2_partNum == expecterPart)
-			{
-				Serial.print ("    |    Writing from buffer 2. Part:"); Serial.println(expecterPart);
-				// check for wrong pard passed
-				hasWrongParts = false;
-				if (!S_WriteFile.write(S_buffer_2, S_buffer_2_readNum))
-				{	
-					// error detected
-					S_writeErrorMesage = "    |    Write data failed";
-					// release semaphores
-					xSemaphoreGive(S_buffer_access_2);
-					xSemaphoreGive(S_writing);
-					vTaskDelete(NULL);
-					return;
-				}
-				// increase part number
-				expecterPart++;
-				// mark buffer as empty
-				S_buffer_2_partNum = -1;
-				// save time
-				t_write = t_write + (millis() - t_s);
-				Serial.println ("    |    Writing from buffer 2. Finished.");
-				// release access to buffer
-				xSemaphoreGive(S_buffer_access_2);
-				// start next round
-				continue;
-			}
-			// if buffer not emty and has not expected part
-			if(S_buffer_2_partNum != -1)
-			{
-				hasWrongParts = true;
-			}
-			// release access to buffer
-			xSemaphoreGive(S_buffer_access_2);
-		}
-
-		Serial.println("    |    Check for parts order issue. ");
-		// check for parts order issue.
-		if(hasWrongParts)
-		{
-			S_writeErrorMesage = "    |    Write data failed. Unexpected data parts.";
+			// error detected
+			S_writeErrorMesage = "    |    Write data failed. Waiting for data in queue for to long.";
+			// release semaphores
 			xSemaphoreGive(S_writing);
-			vTaskDelete(NULL);					
+			vTaskDelete(NULL);
 			return;
 		}
-
+		*/
+		Serial.println("    |    Waiting for data in queue for to long.");
 		Serial.println("    |    Check for writing end. ");
 		// check for writing end.
 		if(xSemaphoreTake(S_reading, 0))
@@ -782,8 +682,8 @@ void ESPWebDAV::handlePutPP()	{
 			vTaskDelete(NULL);
 			return;
 		}
-
-		Serial.println ("    |    ...");
+		Serial.println("    |    Check for writing end. End not detected. Continue.");
+		Serial.println("    |    ...");
 		delay(10);
 	}
 }
