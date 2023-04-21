@@ -201,7 +201,7 @@ void ESPWebDAV::handleLock(ResourceType resource)	{
 	sendHeader("Lock-Token", "urn:uuid:26e57cb3-834d-191a-00de-000042bdecf9");
 
 	size_t contentLen = contentLengthHeader.toInt();
-	uint8_t buf[1024];
+	uint8_t buf[RW_BUF_SIZE];
 	size_t numRead = readBytesWithTimeout(buf, sizeof(buf), contentLen);
 	
 	if(numRead == 0)
@@ -465,7 +465,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	S_reading = xSemaphoreCreateMutex();
 	S_writing = xSemaphoreCreateMutex();
 	struct DataPortin pDataPortin;
-	S_dataQueue = xQueueCreate( 3, sizeof(pDataPortin) );
+	S_dataQueue = xQueueCreate( RW_Q_SIZE, sizeof(pDataPortin) );
 
 	// Take control on reed before writing task started.
 	if(!xSemaphoreTake(S_reading, (TickType_t)100))
@@ -485,7 +485,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		"Task2",     		/* name of task. */
 		10000,       		/* Stack size of task */
 		this,        		/* parameter of the task */
-		1,           		/* priority of the task */
+		0,           		/* priority of the task */
 		&S_WriteTask,		/* Task handle to keep track of created task */
 		0);          		/* pin task to core 1 */
 
@@ -517,7 +517,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		}
 
 		// count work that left
-		size_t numToRead = (numRemaining > 1024) ? 1024 : numRemaining;
+		size_t numToRead = (numRemaining > RW_BUF_SIZE) ? RW_BUF_SIZE : numRemaining;
 		// save num of read date
 		size_t numRead = 0;
 		// save time
@@ -526,7 +526,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		// update part number
 		part_number++;
 		
-		Serial.print ("Reading into buffer. Part: ");Serial.println (part_number);
+		//Serial.printf ("Reading into buffer. Part: %d\n", part_number);
 
 		// read data
 		numRead = readBytesWithTimeout(pDataPortin.buffer, sizeof(pDataPortin.buffer), numToRead);
@@ -537,17 +537,19 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		numRemaining -= numRead;
 		t_read = t_read + (millis() - t_s);;
 		// adding data to queue
-		Serial.println ("Reading into buffer. Adding to queue...");
+		//Serial.println ("Reading into buffer. Adding to queue...");
 		if(xQueueSend( S_dataQueue, &pDataPortin, 1000 / portTICK_PERIOD_MS ))
 		{
-			Serial.println ("Reading into buffer. Finished.");
+			//Serial.println ("Reading into buffer. Finished.");
+			//Serial.printf ("Reading. Done. Part: %d \n", part_number);
+			//Serial.printf ("R %d\n", part_number);
+
 		}
 		else
 		{
 			Serial.println ("Reading into buffer. Error. Can not add to queue.");
 			break;
 		}
-		delay(1);
 
 		// stop if nothing to read
 		if(numRead == 0)
@@ -618,7 +620,9 @@ void ESPWebDAV::handlePutPP()	{
 
 	// save time
 	long t_write = 0;
+	long t_write2 = 0;
 	long t_s = 0;
+	long t_s2 = 0;
 	
 	// read data from stream and write to the file
 	while(true)	
@@ -627,10 +631,10 @@ void ESPWebDAV::handlePutPP()	{
 		
 		t_s = millis();
 		
-		Serial.println("    |    Ask for data in queue... ");
-		if( xQueueReceive( S_dataQueue, &pDataPortin, 200 / portTICK_PERIOD_MS ))
+		//Serial.println("    |    Ask for data in queue... ");
+		if( xQueueReceive( S_dataQueue, &pDataPortin, 1 / portTICK_PERIOD_MS ))
 		{
-			Serial.printf("    |    readNum: %d, partNum: %d \n", pDataPortin.readNum, pDataPortin.partNum);
+			//Serial.printf("    |    readNum: %d, partNum: %d \n", pDataPortin.readNum, pDataPortin.partNum);
 			if(pDataPortin.partNum == -1)
 			{
 				// error detected
@@ -641,11 +645,16 @@ void ESPWebDAV::handlePutPP()	{
 				return;
 			}
 
-			Serial.print ("    |    Writing from buffer. Part:"); Serial.println(pDataPortin.partNum);
+			t_s2 = millis();
+			//Serial.print ("    |    Writing from buffer. Part:"); Serial.println(pDataPortin.partNum);
 			if (S_WriteFile.write(pDataPortin.buffer, pDataPortin.readNum))
 			{
 				t_write = t_write + (millis() - t_s);
-				Serial.println ("    |    Writing from buffer. Finished.");
+				t_write2 = t_write + (millis() - t_s2);
+				//Serial.println ("    |    Writing from buffer. Finished.");
+				//Serial.printf ("    |    Writing from buffer. Finished.");
+				//printf("    |    Writing from buffer. Finished. Part: %d \n", pDataPortin.partNum);
+				//Serial.printf("W %d\n", pDataPortin.partNum);
 				continue;
 			}
 			else
@@ -658,33 +667,21 @@ void ESPWebDAV::handlePutPP()	{
 				return;
 			}
 		}
-		/*
-		else
-		{
-			// error detected
-			S_writeErrorMesage = "    |    Write data failed. Waiting for data in queue for to long.";
-			// release semaphores
-			xSemaphoreGive(S_writing);
-			vTaskDelete(NULL);
-			return;
-		}
-		*/
-		Serial.println("    |    Waiting for data in queue for to long.");
-		Serial.println("    |    Check for writing end. ");
+		//Serial.println("    |    Waiting for data in queue for to long.");
+		//Serial.println("    |    Check for writing end. ");
 		// check for writing end.
 		if(xSemaphoreTake(S_reading, 0))
 		{
 			Serial.println ("    |    Writing. Detected finish.");
 			DBG_PRINT("Write to card time: "); DBG_PRINT( t_write / 1000.0); DBG_PRINTLN(" s.");
-			delay(10);
+			DBG_PRINT("Write to card time2: "); DBG_PRINT( t_write2 / 1000.0); DBG_PRINTLN(" s.");
 			xSemaphoreGive(S_writing);
 			xSemaphoreGive(S_reading);
 			vTaskDelete(NULL);
 			return;
 		}
-		Serial.println("    |    Check for writing end. End not detected. Continue.");
-		Serial.println("    |    ...");
-		delay(10);
+		//Serial.println("    |    Check for writing end. End not detected. Continue.");
+		//Serial.println("    |    ...");
 	}
 }
 

@@ -14,7 +14,9 @@
 // constants for WebServer
 #define CONTENT_LENGTH_UNKNOWN ((size_t) -1)
 #define CONTENT_LENGTH_NOT_SET ((size_t) -2)
-#define HTTP_MAX_POST_WAIT 		5000 
+#define HTTP_MAX_POST_WAIT 		5000
+#define RW_BUF_SIZE		 		1024 * 4
+#define RW_Q_SIZE		 		10
 
 enum ResourceType { RESOURCE_NONE, RESOURCE_FILE, RESOURCE_DIR };
 enum DepthType { DEPTH_NONE, DEPTH_CHILD, DEPTH_ALL };
