@@ -201,7 +201,7 @@ void ESPWebDAV::handleLock(ResourceType resource)	{
 	sendHeader("Lock-Token", "urn:uuid:26e57cb3-834d-191a-00de-000042bdecf9");
 
 	size_t contentLen = contentLengthHeader.toInt();
-	uint8_t buf[RW_BUF_SIZE];
+	uint8_t buf[1024];
 	size_t numRead = readBytesWithTimeout(buf, sizeof(buf), contentLen);
 	
 	if(numRead == 0)
@@ -464,116 +464,81 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	// Reset some.
 	S_reading = xSemaphoreCreateMutex();
 	S_writing = xSemaphoreCreateMutex();
+	S_writingHasError = false;
+	S_readingHasError = false;
 	struct DataPortin pDataPortin;
 	S_dataQueue = xQueueCreate( RW_Q_SIZE, sizeof(pDataPortin) );
 
-	// Take control on reed before writing task started.
-	if(!xSemaphoreTake(S_reading, (TickType_t)100))
-	{
-		return handleWriteError("Unable to obtain controll over read mutex.", NULL);
-	}
-
-	// Start writing task on other core.
-	int core = 0;
-	if(xPortGetCoreID() == core)
-	{
-		core = 1;
-	}
-
-	xTaskCreatePinnedToCore(
-		handlePutTrigger,   /* Task function. */
-		"Task2",     		/* name of task. */
-		10000,       		/* Stack size of task */
-		this,        		/* parameter of the task */
-		0,           		/* priority of the task */
-		&S_WriteTask,		/* Task handle to keep track of created task */
-		0);          		/* pin task to core 1 */
-
-	// Removing file if it exists.
-	SD_MMC.remove(uri.c_str());
-	
-	// Set num of date that we need to read and write.
-	size_t numRemaining = contentLen;
 	// Count number of blocks.
 	int part_number = -1;
 	// Save start time.
 	long tStart = millis();
-	// Prepare to count time for read operation.
-	long t_read = 0;
-	long t_s = 0;
-
 	// Open file to write it.
 	S_WriteFile = SD_MMC.open(uri.c_str(), FILE_WRITE);
-		
-	// read data from stream and write to the file
-	while(numRemaining > 0)
-	{
-		// check if writing got error.
-		if(xSemaphoreTake(S_writing, 0 ))
-		{
-			Serial.println ("Writing error detected.");
-			xSemaphoreGive(S_writing);
-			return handleWriteError(S_writeErrorMesage, &S_WriteFile);
-		}
 
-		// count work that left
-		size_t numToRead = (numRemaining > RW_BUF_SIZE) ? RW_BUF_SIZE : numRemaining;
-		// save num of read date
-		size_t numRead = 0;
-		// save time
-		t_s = millis();
+	xTaskCreatePinnedToCore(
+		StartReadTask,		/* Task function. */
+		"ReadTask",     	/* name of task. */
+		10000,       		/* Stack size of task */
+		this,        		/* parameter of the task */
+		0,           		/* priority of the task */
+		&S_ReadTask,		/* Task handle to keep track of created task */
+		0);          		/* pin task to core 1 */
 
-		// update part number
-		part_number++;
-		
-		//Serial.printf ("Reading into buffer. Part: %d\n", part_number);
+	xTaskCreatePinnedToCore(
+		StartWriteTask,		/* Task function. */
+		"WriteTask",     	/* name of task. */
+		10000,       		/* Stack size of task */
+		this,        		/* parameter of the task */
+		0,           		/* priority of the task */
+		&S_WriteTask,		/* Task handle to keep track of created task */
+		1);          		/* pin task to core 1 */
 
-		// read data
-		numRead = readBytesWithTimeout(pDataPortin.buffer, sizeof(pDataPortin.buffer), numToRead);
-		// save info
-		pDataPortin.partNum = part_number;
-		pDataPortin.readNum = numRead;
-		// update remainig
-		numRemaining -= numRead;
-		t_read = t_read + (millis() - t_s);;
-		// adding data to queue
-		//Serial.println ("Reading into buffer. Adding to queue...");
-		if(xQueueSend( S_dataQueue, &pDataPortin, 1000 / portTICK_PERIOD_MS ))
-		{
-			//Serial.println ("Reading into buffer. Finished.");
-			//Serial.printf ("Reading. Done. Part: %d \n", part_number);
-			//Serial.printf ("R %d\n", part_number);
-
-		}
-		else
-		{
-			Serial.println ("Reading into buffer. Error. Can not add to queue.");
-			break;
-		}
-
-		// stop if nothing to read
-		if(numRead == 0)
-		{
-			break;
-		}
-	}
+	bool readingIsDone = false;
+	bool writingIsDone = false;
 	
-	// mark signal end of reading
-	DBG_PRINTLN("Reading end.");
-	xSemaphoreGive(S_reading);
-	DBG_PRINT(" == Read to buffer time: "); DBG_PRINT( t_read / 1000.0); DBG_PRINTLN(" s.");
+	// Give tasks time to get controll over mutexes.
+	delay(100);
+	// read data from stream and write to the file
+	while(true)
+	{
+		// check if reading got error / done.
+		if( !readingIsDone && xSemaphoreTake(S_reading, 0 ))
+		{
+			if(S_readingHasError)
+			{
+				vTaskDelete(S_ReadTask);
+				Serial.println ("Reading error detected.");
+				xSemaphoreGive(S_reading);
+				vTaskDelete(S_WriteTask);
+				return handleWriteError(S_readingError, &S_WriteFile);
+			}
+			xSemaphoreGive(S_reading);
+			Serial.println ("Reading detected as done.");
+			readingIsDone = true;
+		}
 
-	// waiting for write to finish
-	if(xSemaphoreTake(S_writing, 1000 / portTICK_PERIOD_MS))
-	{
-		DBG_PRINTLN("Wrinting detected as ended.");
-		xSemaphoreGive(S_writing);
-	}
-	else
-	{
-		Serial.println("Terminateing write task.");
-		vTaskDelete(S_WriteTask); 
-		return handleWriteError("Unable to obtain controll over read mutex.", &S_WriteFile);
+		// check if writing got error / done.
+		if( !writingIsDone && xSemaphoreTake(S_writing, 0 ))
+		{
+			if(S_writingHasError)
+			{
+				vTaskDelete(S_WriteTask);
+				Serial.println ("Writing error detected.");
+				xSemaphoreGive(S_writing);
+				if(!readingIsDone)	vTaskDelete(S_WriteTask);
+				return handleWriteError(S_writingError, &S_WriteFile);
+			}
+			Serial.println ("Writing detected as done.");
+			xSemaphoreGive(S_writing);
+			writingIsDone = true;
+		}
+
+		if(readingIsDone && writingIsDone)
+		{
+			break;
+		}
+		delay(200);
 	}
 
 	// stop writing operation
@@ -581,8 +546,8 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	S_WriteFile.close();
 
 	DBG_PRINTLN("=====================================================");
-	DBG_PRINT("File "); DBG_PRINT(contentLen - numRemaining); DBG_PRINT(" bytes stored in: "); DBG_PRINT((millis() - tStart)/1000.0); DBG_PRINTLN(" sec");
-	DBG_PRINT("Speed: "); DBG_PRINT( ((contentLen - numRemaining) / 1024.0) / ((millis() - tStart)/1000.0) ); DBG_PRINTLN(" KB/s.");
+	DBG_PRINT("File "); DBG_PRINT(contentLen / 1024.0); DBG_PRINT(" KB stored in: "); DBG_PRINT((millis() - tStart)/1000.0); DBG_PRINTLN(" sec");
+	DBG_PRINT("Speed: "); DBG_PRINT( ((contentLen) / 1024.0) / ((millis() - tStart)/1000.0) ); DBG_PRINTLN(" KB/s.");
 	DBG_PRINTLN("=====================================================");
 
 	if(resource == RESOURCE_NONE)
@@ -591,32 +556,127 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		send("200 OK", NULL, "");
 }
 
-
-void handlePutTrigger(void * pvParameters)	{
 // ------------------------
-	((ESPWebDAV *) pvParameters)->handlePutPP();
+void ESPWebDAV::ReadTask()	{
+// ------------------------
+	Serial.printf("Read task: Running on core: %d\n", xPortGetCoreID());
+
+	// Reset some.
+	struct DataPortin pDataPortin;
+	size_t contentLen = contentLengthHeader.toInt();
+
+	if(!xSemaphoreTake(S_reading,  200 / portTICK_PERIOD_MS))
+	{
+		// error detected
+		S_readingHasError = true;
+		S_readingError = "Unable to obtain controll over read mutex.";
+		vTaskDelete(NULL);
+		return;
+	}
+
+	// Set num of date that we need to read and write.
+	size_t numRemaining = contentLen;
+	// Count number of blocks.
+	int part_number = -1;
+	// Prepare to count time for read operation.
+	long t_read = 0;
+	long t_read2 = 0;
+	long t_s = 0;
+	uint8_t buffer[1024];
+	//for (size_t i = 0; i < 1024; i++)	buffer[i] = (uint8_t)i;
+	
+	// read data from stream and write to the file
+	while(numRemaining > 0)
+	{
+		// save time
+		t_s = micros();
+
+		// count work that left
+		size_t numToRead = (numRemaining > RW_BUF_SIZE) ? RW_BUF_SIZE : numRemaining;
+		// save num of read date
+		size_t numRead = 0;
+
+		// update part number
+		part_number++;
+		
+		//Serial.printf ("Reading into buffer. Part: %d\n", part_number);
+
+		// read data
+		numRead = readBytesWithTimeout(pDataPortin.buffer, sizeof(pDataPortin.buffer), numToRead);
+
+		// save info
+		pDataPortin.partNum = part_number;
+		pDataPortin.readNum = numRead;
+		// update remainig
+		numRemaining -= numRead;
+		t_read = t_read + (micros() - t_s);
+		long tt = micros() - t_s;
+		Serial.printf ("R t : %d\n", tt);
+		t_read2 += tt;
+		Serial.printf("R time: %d\n", t_read2);
+		// adding data to queue
+		//Serial.println ("Reading into buffer. Adding to queue...");
+		if(xQueueSend( S_dataQueue, &pDataPortin, 1000 / portTICK_PERIOD_MS ))
+		{
+			//Serial.println ("Reading into buffer. Finished.");
+			//Serial.printf ("Reading. Done. Part: %d \n", part_number);
+			//Serial.printf ("R : %d\n", part_number);
+		}
+		else
+		{
+			// error detected
+			S_readingHasError = true;
+			S_readingError = "Reading into buffer. Error. Can not add to queue.";
+			Serial.println ("Reading into buffer. Error. Can not add to queue.");
+			xSemaphoreGive(S_reading);
+			vTaskDelete(NULL);
+			return;
+		}
+
+		// stop if nothing to read
+		if(numRead == 0)
+		{
+			break;
+		}
+	}
+
+	// mark signal end of reading
+	DBG_PRINT("Read to buffer time: "); DBG_PRINT( t_read2 / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
+	xSemaphoreGive(S_reading);
+}
+
+
+
+// ------------------------
+void StartWriteTask(void * pvParameters){
+// ------------------------
+	((ESPWebDAV *) pvParameters)->WriteTask();
 	vTaskDelete(NULL);
 	return;
 }
 
 // ------------------------
-void ESPWebDAV::handlePutPP()	{
+void StartReadTask(void * pvParameters)	{
 // ------------------------
-	Serial.print("    |    Writing running on core: "); Serial.println(xPortGetCoreID());
+	((ESPWebDAV *) pvParameters)->ReadTask();
+	vTaskDelete(NULL);
+	return;
+}
+
+// ------------------------
+void ESPWebDAV::WriteTask()	{
+// ------------------------
+	Serial.printf("Write task: Running on core: %d\n", xPortGetCoreID());
 	// Take control on write.
 	
 	if(!xSemaphoreTake(S_writing,  200 / portTICK_PERIOD_MS))
 	{
 		// error detected
-		S_writeErrorMesage = "    |    Unable to obtain controll over write mutex.";
+		S_writingHasError = true;
+		S_writingError = "Unable to obtain controll over write mutex.";
 		vTaskDelete(NULL);
 		return;
 	}
-	
-	Serial.println("    |    Writing running... ");
-
-	// give some time for read to start;
-	delay(10);
 
 	// save time
 	long t_write = 0;
@@ -624,64 +684,81 @@ void ESPWebDAV::handlePutPP()	{
 	long t_s = 0;
 	long t_s2 = 0;
 	
+	struct DataPortin pDataPortin;
 	// read data from stream and write to the file
 	while(true)	
 	{
-		struct DataPortin pDataPortin;
+		t_s = micros();
 		
-		t_s = millis();
-		
-		//Serial.println("    |    Ask for data in queue... ");
-		if( xQueueReceive( S_dataQueue, &pDataPortin, 1 / portTICK_PERIOD_MS ))
+		//Serial.println("Writing. Ask for data in queue... ");
+		if( xQueueReceive( S_dataQueue, &pDataPortin, 100 / portTICK_PERIOD_MS ))
 		{
 			//Serial.printf("    |    readNum: %d, partNum: %d \n", pDataPortin.readNum, pDataPortin.partNum);
 			if(pDataPortin.partNum == -1)
 			{
 				// error detected
-				S_writeErrorMesage = "    |    Write data failed. Empty data.";
+				Serial.println("Writing. Write data failed. Empty data.");
+				S_writingHasError = true;
+				S_writingError = "Write data failed. Empty data.";
 				// release semaphores
 				xSemaphoreGive(S_writing);
 				vTaskDelete(NULL);
 				return;
 			}
 
-			t_s2 = millis();
-			//Serial.print ("    |    Writing from buffer. Part:"); Serial.println(pDataPortin.partNum);
+			t_s2 = micros();
+			//Serial.print ("Writing from buffer. Part:"); Serial.println(pDataPortin.partNum);
 			if (S_WriteFile.write(pDataPortin.buffer, pDataPortin.readNum))
 			{
-				t_write = t_write + (millis() - t_s);
-				t_write2 = t_write + (millis() - t_s2);
+				t_write = t_write + (micros() - t_s);
+				Serial.printf("W t: %d\n", (micros() - t_s));
+				t_write2 = t_write2 + (micros() - t_s2);
 				//Serial.println ("    |    Writing from buffer. Finished.");
 				//Serial.printf ("    |    Writing from buffer. Finished.");
 				//printf("    |    Writing from buffer. Finished. Part: %d \n", pDataPortin.partNum);
-				//Serial.printf("W %d\n", pDataPortin.partNum);
+				//Serial.printf("W : %d\n", pDataPortin.partNum);
 				continue;
 			}
 			else
 			{	
 				// error detected
-				S_writeErrorMesage = "    |    Write data failed.";
+				Serial.println("Writing. Write data failed.");
+				S_writingHasError = true;
+				S_writingError = "Write data failed.";
 				// release semaphores
 				xSemaphoreGive(S_writing);
 				vTaskDelete(NULL);
 				return;
 			}
 		}
-		//Serial.println("    |    Waiting for data in queue for to long.");
-		//Serial.println("    |    Check for writing end. ");
+
 		// check for writing end.
 		if(xSemaphoreTake(S_reading, 0))
 		{
-			Serial.println ("    |    Writing. Detected finish.");
-			DBG_PRINT("Write to card time: "); DBG_PRINT( t_write / 1000.0); DBG_PRINTLN(" s.");
-			DBG_PRINT("Write to card time2: "); DBG_PRINT( t_write2 / 1000.0); DBG_PRINTLN(" s.");
-			xSemaphoreGive(S_writing);
+			Serial.println ("Writing. Detected reading finish.");
+			if(S_readingHasError)
+			{
+				Serial.println ("Writing. Detected reading error. Terminating.");
+				xSemaphoreGive(S_writing);
+				xSemaphoreGive(S_reading);
+				vTaskDelete(NULL);
+				return;
+			}
 			xSemaphoreGive(S_reading);
+
+			Serial.printf(" Writing. Queue count: %d.", uxQueueMessagesWaiting(S_dataQueue));
+			if(uxQueueMessagesWaiting(S_dataQueue) > 0)
+			{
+				continue;
+			}
+			
+			Serial.println ("Writing. Finish.");
+			DBG_PRINT("Write to card time: "); DBG_PRINT( t_write / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
+			DBG_PRINT("Write to card time2: "); DBG_PRINT( t_write2 / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
+			xSemaphoreGive(S_writing);
 			vTaskDelete(NULL);
 			return;
 		}
-		//Serial.println("    |    Check for writing end. End not detected. Continue.");
-		//Serial.println("    |    ...");
 	}
 }
 

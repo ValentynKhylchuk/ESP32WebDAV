@@ -15,15 +15,15 @@
 #define CONTENT_LENGTH_UNKNOWN ((size_t) -1)
 #define CONTENT_LENGTH_NOT_SET ((size_t) -2)
 #define HTTP_MAX_POST_WAIT 		5000
-#define RW_BUF_SIZE		 		1024 * 4
-#define RW_Q_SIZE		 		10
+#define RW_BUF_SIZE		 		2048
+#define RW_Q_SIZE		 		6
 
 enum ResourceType { RESOURCE_NONE, RESOURCE_FILE, RESOURCE_DIR };
 enum DepthType { DEPTH_NONE, DEPTH_CHILD, DEPTH_ALL };
 
 struct DataPortin
 {
-	uint8_t buffer[1024];
+	uint8_t buffer[RW_BUF_SIZE];
 	size_t readNum = -1;
 	int partNum = -1;
 };
@@ -40,10 +40,15 @@ public:
 
 	SemaphoreHandle_t S_reading = NULL;
 	SemaphoreHandle_t S_writing = NULL;
-	String S_writeErrorMesage;
+	bool S_readingHasError = false;
+	bool S_writingHasError = false;
+	String S_readingError;
+	String S_writingError;
 	TaskHandle_t S_WriteTask;
+	TaskHandle_t S_ReadTask;
 	File S_WriteFile;
-	void handlePutPP();
+	void WriteTask();
+	void ReadTask();
 
 	
 protected:
@@ -101,4 +106,5 @@ protected:
 };
 
 
-void handlePutTrigger(void * pvParameters);
+void StartWriteTask(void * pvParameters);
+void StartReadTask(void * pvParameters);
