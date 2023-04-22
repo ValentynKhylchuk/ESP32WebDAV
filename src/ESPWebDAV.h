@@ -15,8 +15,8 @@
 #define CONTENT_LENGTH_UNKNOWN ((size_t) -1)
 #define CONTENT_LENGTH_NOT_SET ((size_t) -2)
 #define HTTP_MAX_POST_WAIT 		5000
-#define RW_BUF_SIZE		 		2048
-#define RW_Q_SIZE		 		6
+#define RW_BUF_SIZE		 		1024 * 4
+#define RW_Q_SIZE		 		10
 
 enum ResourceType { RESOURCE_NONE, RESOURCE_FILE, RESOURCE_DIR };
 enum DepthType { DEPTH_NONE, DEPTH_CHILD, DEPTH_ALL };
@@ -38,15 +38,20 @@ public:
 
 	QueueHandle_t S_dataQueue;
 
-	SemaphoreHandle_t S_reading = NULL;
-	SemaphoreHandle_t S_writing = NULL;
-	bool S_readingHasError = false;
-	bool S_writingHasError = false;
+	volatile bool S_reading = NULL;
+	volatile bool S_writing = NULL;
+
+	volatile bool S_readingHasError = false;
+	volatile bool S_writingHasError = false;
+
 	String S_readingError;
 	String S_writingError;
+
 	TaskHandle_t S_WriteTask;
 	TaskHandle_t S_ReadTask;
+
 	File S_WriteFile;
+
 	void WriteTask();
 	void ReadTask();
 

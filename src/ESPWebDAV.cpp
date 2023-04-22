@@ -462,10 +462,12 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	Serial.print("Call before new task. Running on core: "); Serial.println(xPortGetCoreID());
 
 	// Reset some.
-	S_reading = xSemaphoreCreateMutex();
-	S_writing = xSemaphoreCreateMutex();
+	//S_reading = xSemaphoreCreateMutex();
+	//S_writing = xSemaphoreCreateMutex();
 	S_writingHasError = false;
 	S_readingHasError = false;
+	bool readingIsDone = false;
+	bool writingIsDone = false;
 	struct DataPortin pDataPortin;
 	S_dataQueue = xQueueCreate( RW_Q_SIZE, sizeof(pDataPortin) );
 
@@ -476,6 +478,8 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	// Open file to write it.
 	S_WriteFile = SD_MMC.open(uri.c_str(), FILE_WRITE);
 
+	Serial.print("Free memory: ");Serial.print(ESP.getFreeHeap()/1024.0);Serial.println(" KB.");
+
 	xTaskCreatePinnedToCore(
 		StartReadTask,		/* Task function. */
 		"ReadTask",     	/* name of task. */
@@ -483,54 +487,62 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		this,        		/* parameter of the task */
 		0,           		/* priority of the task */
 		&S_ReadTask,		/* Task handle to keep track of created task */
-		0);          		/* pin task to core 1 */
+		1);          		/* pin task to core 1 */
 
 	xTaskCreatePinnedToCore(
 		StartWriteTask,		/* Task function. */
 		"WriteTask",     	/* name of task. */
 		10000,       		/* Stack size of task */
 		this,        		/* parameter of the task */
-		0,           		/* priority of the task */
+		1,           		/* priority of the task */
 		&S_WriteTask,		/* Task handle to keep track of created task */
-		1);          		/* pin task to core 1 */
+		0);          		/* pin task to core 1 */
 
-	bool readingIsDone = false;
-	bool writingIsDone = false;
+
 	
-	// Give tasks time to get controll over mutexes.
-	delay(100);
 	// read data from stream and write to the file
 	while(true)
 	{
+		delay(100);
 		// check if reading got error / done.
-		if( !readingIsDone && xSemaphoreTake(S_reading, 0 ))
+		//if( !readingIsDone && xSemaphoreTake(S_reading, 0 ))
+		if( !readingIsDone && !S_reading )
 		{
 			if(S_readingHasError)
 			{
-				vTaskDelete(S_ReadTask);
 				Serial.println ("Reading error detected.");
-				xSemaphoreGive(S_reading);
-				vTaskDelete(S_WriteTask);
+				// stop writing task
+				S_writing = false;
+				//xSemaphoreGive(S_reading);
+				//vTaskDelete(S_WriteTask);
+				vQueueDelete(S_dataQueue);
+				delay(300);
 				return handleWriteError(S_readingError, &S_WriteFile);
 			}
-			xSemaphoreGive(S_reading);
+			//xSemaphoreGive(S_reading);
 			Serial.println ("Reading detected as done.");
 			readingIsDone = true;
 		}
 
 		// check if writing got error / done.
-		if( !writingIsDone && xSemaphoreTake(S_writing, 0 ))
+		//if( !writingIsDone && xSemaphoreTake(S_writing, 0 ))
+		if( !writingIsDone && !S_writing )
 		{
 			if(S_writingHasError)
 			{
-				vTaskDelete(S_WriteTask);
 				Serial.println ("Writing error detected.");
-				xSemaphoreGive(S_writing);
-				if(!readingIsDone)	vTaskDelete(S_WriteTask);
+				// stop writing task
+				S_reading = false;
+				S_writing = false;
+				//vTaskDelete(S_WriteTask);
+				//xSemaphoreGive(S_writing);
+				//if(!readingIsDone)	vTaskDelete(S_ReadTask);
+				vQueueDelete(S_dataQueue);
+				delay(300);
 				return handleWriteError(S_writingError, &S_WriteFile);
 			}
+			//xSemaphoreGive(S_writing);
 			Serial.println ("Writing detected as done.");
-			xSemaphoreGive(S_writing);
 			writingIsDone = true;
 		}
 
@@ -538,17 +550,18 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		{
 			break;
 		}
-		delay(200);
 	}
 
 	// stop writing operation
 	S_WriteFile.flush();
 	S_WriteFile.close();
+	vQueueDelete(S_dataQueue);
 
 	DBG_PRINTLN("=====================================================");
 	DBG_PRINT("File "); DBG_PRINT(contentLen / 1024.0); DBG_PRINT(" KB stored in: "); DBG_PRINT((millis() - tStart)/1000.0); DBG_PRINTLN(" sec");
 	DBG_PRINT("Speed: "); DBG_PRINT( ((contentLen) / 1024.0) / ((millis() - tStart)/1000.0) ); DBG_PRINTLN(" KB/s.");
 	DBG_PRINTLN("=====================================================");
+	Serial.print("Free memory: ");Serial.print(ESP.getFreeHeap()/1024.0);Serial.println(" KB.");
 
 	if(resource == RESOURCE_NONE)
 		send("201 Created", NULL, "");
@@ -565,6 +578,8 @@ void ESPWebDAV::ReadTask()	{
 	struct DataPortin pDataPortin;
 	size_t contentLen = contentLengthHeader.toInt();
 
+	S_reading = true;
+	/*
 	if(!xSemaphoreTake(S_reading,  200 / portTICK_PERIOD_MS))
 	{
 		// error detected
@@ -573,6 +588,7 @@ void ESPWebDAV::ReadTask()	{
 		vTaskDelete(NULL);
 		return;
 	}
+	*/
 
 	// Set num of date that we need to read and write.
 	size_t numRemaining = contentLen;
@@ -580,9 +596,8 @@ void ESPWebDAV::ReadTask()	{
 	int part_number = -1;
 	// Prepare to count time for read operation.
 	long t_read = 0;
-	long t_read2 = 0;
 	long t_s = 0;
-	uint8_t buffer[1024];
+	//uint8_t buffer[1024];
 	//for (size_t i = 0; i < 1024; i++)	buffer[i] = (uint8_t)i;
 	
 	// read data from stream and write to the file
@@ -590,6 +605,10 @@ void ESPWebDAV::ReadTask()	{
 	{
 		// save time
 		t_s = micros();
+
+		if(!S_reading)	return;
+
+		//Serial.print("Free memory: ");Serial.print(ESP.getFreeHeap()/1024.0);Serial.println(" KB.");
 
 		// count work that left
 		size_t numToRead = (numRemaining > RW_BUF_SIZE) ? RW_BUF_SIZE : numRemaining;
@@ -601,8 +620,11 @@ void ESPWebDAV::ReadTask()	{
 		
 		//Serial.printf ("Reading into buffer. Part: %d\n", part_number);
 
+
 		// read data
 		numRead = readBytesWithTimeout(pDataPortin.buffer, sizeof(pDataPortin.buffer), numToRead);
+
+		if(!S_reading)	return;
 
 		// save info
 		pDataPortin.partNum = part_number;
@@ -610,10 +632,8 @@ void ESPWebDAV::ReadTask()	{
 		// update remainig
 		numRemaining -= numRead;
 		t_read = t_read + (micros() - t_s);
-		long tt = micros() - t_s;
-		Serial.printf ("R t : %d\n", tt);
-		t_read2 += tt;
-		Serial.printf("R time: %d\n", t_read2);
+		//Serial.printf ("R t : %d\n", micros() - t_s);
+
 		// adding data to queue
 		//Serial.println ("Reading into buffer. Adding to queue...");
 		if(xQueueSend( S_dataQueue, &pDataPortin, 1000 / portTICK_PERIOD_MS ))
@@ -628,8 +648,9 @@ void ESPWebDAV::ReadTask()	{
 			S_readingHasError = true;
 			S_readingError = "Reading into buffer. Error. Can not add to queue.";
 			Serial.println ("Reading into buffer. Error. Can not add to queue.");
-			xSemaphoreGive(S_reading);
-			vTaskDelete(NULL);
+			S_reading = false;
+			//xSemaphoreGive(S_reading);
+			//vTaskDelete(NULL);
 			return;
 		}
 
@@ -641,10 +662,10 @@ void ESPWebDAV::ReadTask()	{
 	}
 
 	// mark signal end of reading
-	DBG_PRINT("Read to buffer time: "); DBG_PRINT( t_read2 / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
-	xSemaphoreGive(S_reading);
+	DBG_PRINT("Read to buffer time: "); DBG_PRINT( t_read / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
+	//xSemaphoreGive(S_reading);
+	S_reading = false;
 }
-
 
 
 // ------------------------
@@ -666,9 +687,11 @@ void StartReadTask(void * pvParameters)	{
 // ------------------------
 void ESPWebDAV::WriteTask()	{
 // ------------------------
+	S_writing = true;
 	Serial.printf("Write task: Running on core: %d\n", xPortGetCoreID());
 	// Take control on write.
 	
+	/*
 	if(!xSemaphoreTake(S_writing,  200 / portTICK_PERIOD_MS))
 	{
 		// error detected
@@ -677,6 +700,7 @@ void ESPWebDAV::WriteTask()	{
 		vTaskDelete(NULL);
 		return;
 	}
+	*/
 
 	// save time
 	long t_write = 0;
@@ -689,9 +713,11 @@ void ESPWebDAV::WriteTask()	{
 	while(true)	
 	{
 		t_s = micros();
+		//delay(200);
+		if(!S_writing)	return;
 		
 		//Serial.println("Writing. Ask for data in queue... ");
-		if( xQueueReceive( S_dataQueue, &pDataPortin, 100 / portTICK_PERIOD_MS ))
+		if( xQueueReceive( S_dataQueue, &pDataPortin, 400 / portTICK_PERIOD_MS ))
 		{
 			//Serial.printf("    |    readNum: %d, partNum: %d \n", pDataPortin.readNum, pDataPortin.partNum);
 			if(pDataPortin.partNum == -1)
@@ -701,17 +727,20 @@ void ESPWebDAV::WriteTask()	{
 				S_writingHasError = true;
 				S_writingError = "Write data failed. Empty data.";
 				// release semaphores
-				xSemaphoreGive(S_writing);
-				vTaskDelete(NULL);
+				//xSemaphoreGive(S_writing);
+				//vTaskDelete(NULL);
+				S_writing = false;
 				return;
 			}
 
 			t_s2 = micros();
+			if(!S_writing)	return;
+
 			//Serial.print ("Writing from buffer. Part:"); Serial.println(pDataPortin.partNum);
 			if (S_WriteFile.write(pDataPortin.buffer, pDataPortin.readNum))
 			{
 				t_write = t_write + (micros() - t_s);
-				Serial.printf("W t: %d\n", (micros() - t_s));
+				//Serial.printf("W t: %d\n", (micros() - t_s));
 				t_write2 = t_write2 + (micros() - t_s2);
 				//Serial.println ("    |    Writing from buffer. Finished.");
 				//Serial.printf ("    |    Writing from buffer. Finished.");
@@ -726,37 +755,41 @@ void ESPWebDAV::WriteTask()	{
 				S_writingHasError = true;
 				S_writingError = "Write data failed.";
 				// release semaphores
-				xSemaphoreGive(S_writing);
-				vTaskDelete(NULL);
+				//xSemaphoreGive(S_writing);
+				//vTaskDelete(NULL);
+				S_writing = false;
 				return;
 			}
 		}
 
 		// check for writing end.
-		if(xSemaphoreTake(S_reading, 0))
+		//if(xSemaphoreTake(S_reading, 0))
+		if(!S_reading)
 		{
-			Serial.println ("Writing. Detected reading finish.");
 			if(S_readingHasError)
 			{
 				Serial.println ("Writing. Detected reading error. Terminating.");
-				xSemaphoreGive(S_writing);
-				xSemaphoreGive(S_reading);
-				vTaskDelete(NULL);
+				//xSemaphoreGive(S_writing);
+				//xSemaphoreGive(S_reading);
+				//vTaskDelete(NULL);
+				S_writing = false;
 				return;
 			}
-			xSemaphoreGive(S_reading);
+			//xSemaphoreGive(S_reading);
 
 			Serial.printf(" Writing. Queue count: %d.", uxQueueMessagesWaiting(S_dataQueue));
 			if(uxQueueMessagesWaiting(S_dataQueue) > 0)
 			{
+				//Serial.println ("Writing. Detected reading finish. Continue writing.");
 				continue;
 			}
 			
 			Serial.println ("Writing. Finish.");
 			DBG_PRINT("Write to card time: "); DBG_PRINT( t_write / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
 			DBG_PRINT("Write to card time2: "); DBG_PRINT( t_write2 / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
-			xSemaphoreGive(S_writing);
-			vTaskDelete(NULL);
+			//xSemaphoreGive(S_writing);
+			//vTaskDelete(NULL);
+			S_writing = false;
 			return;
 		}
 	}
