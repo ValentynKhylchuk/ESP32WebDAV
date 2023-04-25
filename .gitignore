@@ -1,3 +1,4 @@
 .vscode/
 .pioenvs/
 sdkconfig.esp32dev.old
+dependencies.lock
