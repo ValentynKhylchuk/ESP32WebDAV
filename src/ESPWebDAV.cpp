@@ -318,11 +318,16 @@ void ESPWebDAV::sendPropResponse(boolean recursing, File *curFile)	{
 	String fullResPath = uri;
 
 	if(recursing)
+	{
 		if(fullResPath.endsWith("/"))
+		{
 			fullResPath += String(buf);
+		}
 		else
+		{
 			fullResPath += "/" + String(buf);
-
+		}
+	}
 	// get file modified time
 	//dir_t dir;
 	time_t lw = curFile->getLastWrite();
@@ -471,8 +476,6 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	struct DataPortin pDataPortin;
 	S_dataQueue = xQueueCreate( RW_Q_SIZE, sizeof(pDataPortin) );
 
-	// Count number of blocks.
-	int part_number = -1;
 	// Save start time.
 	long tStart = millis();
 	// Open file to write it.
@@ -487,7 +490,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		this,        		/* parameter of the task */
 		0,           		/* priority of the task */
 		&S_ReadTask,		/* Task handle to keep track of created task */
-		1);          		/* pin task to core 1 */
+		0);          		/* pin task to core 1 */
 
 	xTaskCreatePinnedToCore(
 		StartWriteTask,		/* Task function. */
@@ -496,7 +499,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		this,        		/* parameter of the task */
 		1,           		/* priority of the task */
 		&S_WriteTask,		/* Task handle to keep track of created task */
-		0);          		/* pin task to core 1 */
+		1);          		/* pin task to core 1 */
 
 
 	
