@@ -1,4 +1,4 @@
-// WebDAV server using ESP8266 and SD card filesystem
+// WebDAV server using ESP32 and SD_MMC card filesystem
 // Targeting Windows 7 Explorer WebDav
 
 #include "SD_MMC.h"
@@ -15,39 +15,46 @@ const char *wdays[]  = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
 
 // ------------------------
-bool ESPWebDAV::init(int chipSelectPin, int serverPort) {
+void ESPWebDAV::init(int serverPort) {
 // ------------------------
-
-	//_canRunOnSecond = xSemaphoreCreateMutex();
-
 	// start the wifi server
 	server = new WiFiServer(serverPort);
 	server->begin();
 
-	// Get time ???
+	// Get time
 	WiFi.waitForConnectResult();
-  	configTime(0, 0, "pool.ntp.org");
-	// https://raw.githubusercontent.com/nayarsystems/posix_tz_db/master/zones.csv
+  	configTime(0, 0, "pool.ntp.org");// https://raw.githubusercontent.com/nayarsystems/posix_tz_db/master/zones.csv
   	setenv("TZ", "EET-2EEST,M3.5.0/3,M10.5.0/4", 1);
   	tzset();
   	while (time(NULL) < 1E6) delay(1000);
 
-  	//Serial.printf("\n\nsystime: %d\n", time(NULL));
   	time_t now = time(&now);
-	Serial.println(ctime(&now));
-	// --- ?
+	DBG_PRINTLN(ctime(&now));
 	
 	// initialize the SD card
 	//return sd.begin(chipSelectPin, spiSettings);
-	return SD_MMC.begin();
+	//return SD_MMC.begin();
 }
 
+// ------------------------
+bool ESPWebDAV::takeSD() {
+// ------------------------
+	// initialize the SD card
+	return SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_HIGHSPEED);
+}
+
+// ------------------------
+void ESPWebDAV::releaseSD() {
+// ------------------------
+
+	return SD_MMC.end();
+}
 
 
 // ------------------------
 void ESPWebDAV::handleNotFound() {
 // ------------------------
-	Serial.println("handleNotFound");
+	DBG_PRINTLN("handleNotFound");
 	String message = "Not found\n";
 	message += "URI: ";
 	message += uri;
@@ -65,7 +72,7 @@ void ESPWebDAV::handleNotFound() {
 // ------------------------
 void ESPWebDAV::handleReject(String rejectMessage)	{
 // ------------------------
-	Serial.println("handleReject");
+	DBG_PRINTLN("handleReject");
 	DBG_PRINT("Rejecting request: "); DBG_PRINTLN(rejectMessage);
 
 	// handle options
@@ -103,7 +110,7 @@ void ESPWebDAV::handleReject(String rejectMessage)	{
 // ------------------------
 void ESPWebDAV::handleRequest(String blank)	{
 // ------------------------
-	Serial.println("handleRequest");
+	DBG_PRINTLN("handleRequest");
 	ResourceType resource = RESOURCE_NONE;
 
 	// does uri refer to a file or directory or a null?
@@ -178,7 +185,7 @@ void ESPWebDAV::handleRequest(String blank)	{
 // ------------------------
 void ESPWebDAV::handleOptions(ResourceType resource)	{
 // ------------------------
-	Serial.println("handleOptions");
+	DBG_PRINTLN("handleOptions");
 	DBG_PRINTLN("Processing OPTION");
 	sendHeader("Allow", "PROPFIND,GET,DELETE,PUT,COPY,MOVE");
 	send("200 OK", NULL, "");
@@ -189,7 +196,7 @@ void ESPWebDAV::handleOptions(ResourceType resource)	{
 // ------------------------
 void ESPWebDAV::handleLock(ResourceType resource)	{
 // ------------------------
-	Serial.println("handleLock");
+	DBG_PRINTLN("handleLock");
 	
 	DBG_PRINTLN("Processing LOCK");
 	
@@ -227,7 +234,7 @@ void ESPWebDAV::handleLock(ResourceType resource)	{
 // ------------------------
 void ESPWebDAV::handleUnlock(ResourceType resource)	{
 // ------------------------
-	Serial.println("handleUnlock");
+	DBG_PRINTLN("handleUnlock");
 	DBG_PRINTLN("Processing UNLOCK");
 	sendHeader("Allow", "PROPPATCH,PROPFIND,OPTIONS,DELETE,UNLOCK,COPY,LOCK,MOVE,HEAD,POST,PUT,GET");
 	sendHeader("Lock-Token", "urn:uuid:26e57cb3-834d-191a-00de-000042bdecf9");
@@ -240,7 +247,7 @@ void ESPWebDAV::handleUnlock(ResourceType resource)	{
 // ------------------------
 void ESPWebDAV::handlePropPatch(ResourceType resource)	{
 // ------------------------
-	Serial.println("handlePropPatch");
+	DBG_PRINTLN("handlePropPatch");
 	DBG_PRINTLN("PROPPATCH forwarding to PROPFIND");
 	handleProp(resource);
 }
@@ -250,7 +257,7 @@ void ESPWebDAV::handlePropPatch(ResourceType resource)	{
 // ------------------------
 void ESPWebDAV::handleProp(ResourceType resource)	{
 // ------------------------
-	Serial.println("handleProp");
+	DBG_PRINTLN("handleProp");
 	DBG_PRINTLN("Processing PROPFIND");
 	// check depth header
 	DepthType depth = DEPTH_NONE;
@@ -385,7 +392,7 @@ void ESPWebDAV::sendPropResponse(boolean recursing, File *curFile)	{
 // ------------------------
 void ESPWebDAV::handleGet(ResourceType resource, bool isGet)	{
 // ------------------------
-	Serial.println("handleGet");
+	DBG_PRINTLN("handleGet");
 	DBG_PRINTLN("Processing GET");
 
 	// does URI refer to an existing file resource
@@ -430,7 +437,7 @@ void ESPWebDAV::handleGet(ResourceType resource, bool isGet)	{
 // ------------------------
 void ESPWebDAV::handlePut(ResourceType resource)	{
 // ------------------------
-	Serial.println("handlePut");
+	DBG_PRINTLN("handlePut");
 	DBG_PRINTLN("Processing Put");
 
 	// does URI refer to a directory
@@ -456,7 +463,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	size_t contentLen = contentLengthHeader.toInt();
 	if(contentLen <= 0)
 	{
-		Serial.println("There is no content to write. Write task creation skipped.");
+		DBG_PRINTLN("There is no content to write. Write task creation skipped.");
 		if(resource == RESOURCE_NONE)
 			send("201 Created", NULL, "");
 		else
@@ -464,7 +471,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 		return;
 	}
 	
-	Serial.print("Call before new task. Running on core: "); Serial.println(xPortGetCoreID());
+	DBG_PRINT("Call before new task. Running on core: "); DBG_PRINTLN(xPortGetCoreID());
 
 	// Reset some.
 	//S_reading = xSemaphoreCreateMutex();
@@ -481,7 +488,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	// Open file to write it.
 	S_WriteFile = SD_MMC.open(uri.c_str(), FILE_WRITE);
 
-	Serial.print("Free memory: ");Serial.print(ESP.getFreeHeap()/1024.0);Serial.println(" KB.");
+	DBG_PRINT("Free memory: ");DBG_PRINT(ESP.getFreeHeap()/1024.0);DBG_PRINTLN(" KB.");
 
 	xTaskCreatePinnedToCore(
 		StartReadTask,		/* Task function. */
@@ -508,44 +515,35 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	{
 		delay(100);
 		// check if reading got error / done.
-		//if( !readingIsDone && xSemaphoreTake(S_reading, 0 ))
 		if( !readingIsDone && !S_reading )
 		{
 			if(S_readingHasError)
 			{
-				Serial.println ("Reading error detected.");
+				DBG_PRINTLN ("Reading error detected.");
 				// stop writing task
 				S_writing = false;
-				//xSemaphoreGive(S_reading);
-				//vTaskDelete(S_WriteTask);
 				vQueueDelete(S_dataQueue);
 				delay(300);
 				return handleWriteError(S_readingError, &S_WriteFile);
 			}
-			//xSemaphoreGive(S_reading);
-			Serial.println ("Reading detected as done.");
+			DBG_PRINTLN ("Reading detected as done.");
 			readingIsDone = true;
 		}
 
 		// check if writing got error / done.
-		//if( !writingIsDone && xSemaphoreTake(S_writing, 0 ))
 		if( !writingIsDone && !S_writing )
 		{
 			if(S_writingHasError)
 			{
-				Serial.println ("Writing error detected.");
+				DBG_PRINTLN ("Writing error detected.");
 				// stop writing task
 				S_reading = false;
 				S_writing = false;
-				//vTaskDelete(S_WriteTask);
-				//xSemaphoreGive(S_writing);
-				//if(!readingIsDone)	vTaskDelete(S_ReadTask);
 				vQueueDelete(S_dataQueue);
 				delay(300);
 				return handleWriteError(S_writingError, &S_WriteFile);
 			}
-			//xSemaphoreGive(S_writing);
-			Serial.println ("Writing detected as done.");
+			DBG_PRINTLN ("Writing detected as done.");
 			writingIsDone = true;
 		}
 
@@ -564,7 +562,7 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 	DBG_PRINT("File "); DBG_PRINT(contentLen / 1024.0); DBG_PRINT(" KB stored in: "); DBG_PRINT((millis() - tStart)/1000.0); DBG_PRINTLN(" sec");
 	DBG_PRINT("Speed: "); DBG_PRINT( ((contentLen) / 1024.0) / ((millis() - tStart)/1000.0) ); DBG_PRINTLN(" KB/s.");
 	DBG_PRINTLN("=====================================================");
-	Serial.print("Free memory: ");Serial.print(ESP.getFreeHeap()/1024.0);Serial.println(" KB.");
+	DBG_PRINT("Free memory: ");DBG_PRINT(ESP.getFreeHeap()/1024.0);DBG_PRINTLN(" KB.");
 
 	if(resource == RESOURCE_NONE)
 		send("201 Created", NULL, "");
@@ -575,23 +573,13 @@ void ESPWebDAV::handlePut(ResourceType resource)	{
 // ------------------------
 void ESPWebDAV::ReadTask()	{
 // ------------------------
-	Serial.printf("Read task: Running on core: %d\n", xPortGetCoreID());
+	DBG_PRINT("Read task: Running on core: "); DBG_PRINTLN(xPortGetCoreID());
 
 	// Reset some.
 	struct DataPortin pDataPortin;
 	size_t contentLen = contentLengthHeader.toInt();
 
 	S_reading = true;
-	/*
-	if(!xSemaphoreTake(S_reading,  200 / portTICK_PERIOD_MS))
-	{
-		// error detected
-		S_readingHasError = true;
-		S_readingError = "Unable to obtain controll over read mutex.";
-		vTaskDelete(NULL);
-		return;
-	}
-	*/
 
 	// Set num of date that we need to read and write.
 	size_t numRemaining = contentLen;
@@ -611,7 +599,7 @@ void ESPWebDAV::ReadTask()	{
 
 		if(!S_reading)	return;
 
-		//Serial.print("Free memory: ");Serial.print(ESP.getFreeHeap()/1024.0);Serial.println(" KB.");
+		//DBG_PRINT("Free memory: ");DBG_PRINT(ESP.getFreeHeap()/1024.0);DBG_PRINTLN(" KB.");
 
 		// count work that left
 		size_t numToRead = (numRemaining > RW_BUF_SIZE) ? RW_BUF_SIZE : numRemaining;
@@ -621,7 +609,7 @@ void ESPWebDAV::ReadTask()	{
 		// update part number
 		part_number++;
 		
-		//Serial.printf ("Reading into buffer. Part: %d\n", part_number);
+		//DBG_PRINTf ("Reading into buffer. Part: %d\n", part_number);
 
 
 		// read data
@@ -635,25 +623,23 @@ void ESPWebDAV::ReadTask()	{
 		// update remainig
 		numRemaining -= numRead;
 		t_read = t_read + (micros() - t_s);
-		//Serial.printf ("R t : %d\n", micros() - t_s);
+		//DBG_PRINTf ("R t : %d\n", micros() - t_s);
 
 		// adding data to queue
-		//Serial.println ("Reading into buffer. Adding to queue...");
+		//DBG_PRINTLN ("Reading into buffer. Adding to queue...");
 		if(xQueueSend( S_dataQueue, &pDataPortin, 1000 / portTICK_PERIOD_MS ))
 		{
-			//Serial.println ("Reading into buffer. Finished.");
-			//Serial.printf ("Reading. Done. Part: %d \n", part_number);
-			//Serial.printf ("R : %d\n", part_number);
+			//DBG_PRINTLN ("Reading into buffer. Finished.");
+			//DBG_PRINTf ("Reading. Done. Part: %d \n", part_number);
+			//DBG_PRINTf ("R : %d\n", part_number);
 		}
 		else
 		{
 			// error detected
 			S_readingHasError = true;
 			S_readingError = "Reading into buffer. Error. Can not add to queue.";
-			Serial.println ("Reading into buffer. Error. Can not add to queue.");
+			DBG_PRINTLN ("Reading into buffer. Error. Can not add to queue.");
 			S_reading = false;
-			//xSemaphoreGive(S_reading);
-			//vTaskDelete(NULL);
 			return;
 		}
 
@@ -666,7 +652,6 @@ void ESPWebDAV::ReadTask()	{
 
 	// mark signal end of reading
 	DBG_PRINT("Read to buffer time: "); DBG_PRINT( t_read / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
-	//xSemaphoreGive(S_reading);
 	S_reading = false;
 }
 
@@ -691,19 +676,7 @@ void StartReadTask(void * pvParameters)	{
 void ESPWebDAV::WriteTask()	{
 // ------------------------
 	S_writing = true;
-	Serial.printf("Write task: Running on core: %d\n", xPortGetCoreID());
-	// Take control on write.
-	
-	/*
-	if(!xSemaphoreTake(S_writing,  200 / portTICK_PERIOD_MS))
-	{
-		// error detected
-		S_writingHasError = true;
-		S_writingError = "Unable to obtain controll over write mutex.";
-		vTaskDelete(NULL);
-		return;
-	}
-	*/
+	DBG_PRINT("Write task: Running on core: "); DBG_PRINTLN(xPortGetCoreID());
 
 	// save time
 	long t_write = 0;
@@ -719,19 +692,17 @@ void ESPWebDAV::WriteTask()	{
 		//delay(200);
 		if(!S_writing)	return;
 		
-		//Serial.println("Writing. Ask for data in queue... ");
+		//DBG_PRINTLN("Writing. Ask for data in queue... ");
 		if( xQueueReceive( S_dataQueue, &pDataPortin, 400 / portTICK_PERIOD_MS ))
 		{
-			//Serial.printf("    |    readNum: %d, partNum: %d \n", pDataPortin.readNum, pDataPortin.partNum);
+			//DBG_PRINTf("    |    readNum: %d, partNum: %d \n", pDataPortin.readNum, pDataPortin.partNum);
 			if(pDataPortin.partNum == -1)
 			{
 				// error detected
-				Serial.println("Writing. Write data failed. Empty data.");
+				DBG_PRINTLN("Writing. Write data failed. Empty data.");
 				S_writingHasError = true;
 				S_writingError = "Write data failed. Empty data.";
 				// release semaphores
-				//xSemaphoreGive(S_writing);
-				//vTaskDelete(NULL);
 				S_writing = false;
 				return;
 			}
@@ -739,59 +710,50 @@ void ESPWebDAV::WriteTask()	{
 			t_s2 = micros();
 			if(!S_writing)	return;
 
-			//Serial.print ("Writing from buffer. Part:"); Serial.println(pDataPortin.partNum);
+			//DBG_PRINT ("Writing from buffer. Part:"); DBG_PRINTLN(pDataPortin.partNum);
 			if (S_WriteFile.write(pDataPortin.buffer, pDataPortin.readNum))
 			{
 				t_write = t_write + (micros() - t_s);
-				//Serial.printf("W t: %d\n", (micros() - t_s));
+				//DBG_PRINTf("W t: %d\n", (micros() - t_s));
 				t_write2 = t_write2 + (micros() - t_s2);
-				//Serial.println ("    |    Writing from buffer. Finished.");
-				//Serial.printf ("    |    Writing from buffer. Finished.");
+				//DBG_PRINTLN ("    |    Writing from buffer. Finished.");
+				//DBG_PRINTf ("    |    Writing from buffer. Finished.");
 				//printf("    |    Writing from buffer. Finished. Part: %d \n", pDataPortin.partNum);
-				//Serial.printf("W : %d\n", pDataPortin.partNum);
+				//DBG_PRINTf("W : %d\n", pDataPortin.partNum);
 				continue;
 			}
 			else
 			{	
 				// error detected
-				Serial.println("Writing. Write data failed.");
+				DBG_PRINTLN("Writing. Write data failed.");
 				S_writingHasError = true;
 				S_writingError = "Write data failed.";
 				// release semaphores
-				//xSemaphoreGive(S_writing);
-				//vTaskDelete(NULL);
 				S_writing = false;
 				return;
 			}
 		}
 
 		// check for writing end.
-		//if(xSemaphoreTake(S_reading, 0))
 		if(!S_reading)
 		{
 			if(S_readingHasError)
 			{
-				Serial.println ("Writing. Detected reading error. Terminating.");
-				//xSemaphoreGive(S_writing);
-				//xSemaphoreGive(S_reading);
-				//vTaskDelete(NULL);
+				DBG_PRINTLN ("Writing. Detected reading error. Terminating.");
 				S_writing = false;
 				return;
 			}
-			//xSemaphoreGive(S_reading);
 
-			Serial.printf(" Writing. Queue count: %d.", uxQueueMessagesWaiting(S_dataQueue));
+			//DBG_PRINTf(" Writing. Queue count: %d.", uxQueueMessagesWaiting(S_dataQueue));
 			if(uxQueueMessagesWaiting(S_dataQueue) > 0)
 			{
-				//Serial.println ("Writing. Detected reading finish. Continue writing.");
+				//DBG_PRINTLN ("Writing. Detected reading finish. Continue writing.");
 				continue;
 			}
 			
-			Serial.println ("Writing. Finish.");
-			DBG_PRINT("Write to card time: "); DBG_PRINT( t_write / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
-			DBG_PRINT("Write to card time2: "); DBG_PRINT( t_write2 / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
-			//xSemaphoreGive(S_writing);
-			//vTaskDelete(NULL);
+			DBG_PRINTLN ("Writing. Finish.");
+			DBG_PRINT("Write to card total time: "); DBG_PRINT( t_write / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
+			DBG_PRINT("Write to card real time: "); DBG_PRINT( t_write2 / 1000.0 / 1000.0); DBG_PRINTLN(" s.");
 			S_writing = false;
 			return;
 		}
@@ -805,7 +767,7 @@ void ESPWebDAV::WriteTask()	{
 //void ESPWebDAV::handleWriteError(String message, FatFile *wFile)	{
 void ESPWebDAV::handleWriteError(String message, File *wFile)	{
 // ------------------------
-	Serial.println("handleWriteError");
+	DBG_PRINTLN("handleWriteError");
 	// close this file
 	wFile->close();
 	// delete the wrile being written
@@ -820,7 +782,7 @@ void ESPWebDAV::handleWriteError(String message, File *wFile)	{
 // ------------------------
 void ESPWebDAV::handleDirectoryCreate(ResourceType resource)	{
 // ------------------------
-	Serial.println("handleDirectoryCreate");
+	DBG_PRINTLN("handleDirectoryCreate");
 	DBG_PRINTLN("Processing MKCOL");
 	
 	// does URI refer to anything
@@ -846,7 +808,7 @@ void ESPWebDAV::handleDirectoryCreate(ResourceType resource)	{
 // ------------------------
 void ESPWebDAV::handleMove(ResourceType resource)	{
 // ------------------------
-	Serial.println("handleMove");
+	DBG_PRINTLN("handleMove");
 	DBG_PRINTLN("Processing MOVE");
 	
 	// does URI refer to anything
@@ -880,7 +842,7 @@ void ESPWebDAV::handleMove(ResourceType resource)	{
 // ------------------------
 void ESPWebDAV::handleDelete(ResourceType resource)	{
 // ------------------------
-	Serial.println("handleDelete");
+	DBG_PRINTLN("handleDelete");
 	DBG_PRINTLN("Processing DELETE");
 	
 	// does URI refer to anything
