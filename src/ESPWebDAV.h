@@ -30,7 +30,9 @@ struct DataPortin
 
 class ESPWebDAV	{
 public:
-	bool init(int chipSelectPin, int serverPort);
+	void init(int serverPort);
+	bool takeSD();
+	void releaseSD();
 	bool isClientWaiting();
 	void handleClient(String blank = "");
 	void rejectClient(String rejectMessage);
