@@ -45,10 +45,10 @@ void setup()
 	// Some logs.
     DBG_INIT(115200);
     DBG_PRINTLN("");
-    DBG_PRINTLN(" ==============");
-    DBG_PRINTLN(" ==  Hello!  ==");
-    DBG_PRINTLN(" ==============");
-	DBG_PRINT(" = CPU: ");DBG_PRINT(CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ);DBG_PRINTLN(" MHz.");
+    DBG_PRINTLN("==============");
+    DBG_PRINTLN("==  Hello!  ==");
+    DBG_PRINTLN("==============");
+	DBG_PRINT("= CPU: ");DBG_PRINT(CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ);DBG_PRINTLN(" MHz.");
 
     // Detect when other master uses SPI bus.
     pinMode(CS_SENSE, INPUT);
