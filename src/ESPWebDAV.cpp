@@ -17,10 +17,13 @@ const char *wdays[]  = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 // ------------------------
 void ESPWebDAV::init(int serverPort) {
 // ------------------------
+
+	DBG_PRINTLN(" a0 ---- ");
 	// start the wifi server
 	server = new WiFiServer(serverPort);
 	server->begin();
 
+	/*
 	// Get time
 	WiFi.waitForConnectResult();
   	configTime(0, 0, "pool.ntp.org");// https://raw.githubusercontent.com/nayarsystems/posix_tz_db/master/zones.csv
@@ -28,8 +31,12 @@ void ESPWebDAV::init(int serverPort) {
   	tzset();
   	while (time(NULL) < 1E6) delay(1000);
 
+	DBG_PRINTLN(" a ---- ");
   	time_t now = time(&now);
 	DBG_PRINTLN(ctime(&now));
+	*/
+
+	DBG_PRINTLN(" b ---- ");
 	
 	// initialize the SD card
 	//return sd.begin(chipSelectPin, spiSettings);
